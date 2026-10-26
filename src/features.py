@@ -19,7 +19,12 @@ extractor = tldextract.TLDExtract(suffix_list_urls=())
 
 TOKEN_SEPARATOR = re.compile(r"[/\-._?=&]+")
 SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
-
+label_mapping = {
+    'benign': 0,
+    'defacement': 1,
+    'phishing': 2,
+    'malware': 3
+}
 
 # ========== FUNKCJE POMOCNICZE ==========
 
@@ -79,15 +84,13 @@ def extract_features(url):
     if not isinstance(url, str):
         url = ""
 
-    original_url = url
-
     # Zachowujemy oryginalny zapis przy obliczaniu
     # długości, liczników znaków i HTTPS.
-    parsed = parse_url(original_url)
+    parsed = parse_url(url)
 
     hostname = parsed.hostname or ""
-    path = parsed.path
-    query = parsed.query
+    path = parsed.path or ""
+    query = parsed.query or ""
 
     # Domeny i subdomeny
     # Rozpoznanie typu hosta
@@ -99,37 +102,33 @@ def extract_features(url):
 
     if is_ip:
         # Adres IP nie ma domeny, TLD ani subdomeny
-        registered_domain = ""
+        domain = ""
         tld = ""
+        suffix = ""
         subdomain = ""
 
     else:
         # Standardowa ekstrakcja domeny
         extracted = extractor(hostname)
-
-        registered_domain = (
-            f"{extracted.domain}.{extracted.suffix}"
-            if extracted.domain and extracted.suffix
-            else extracted.domain or ""
-        )
-
+        domain = extracted.domain or ""
         tld = (
             extracted.suffix.rsplit(".", 1)[-1]
             if extracted.suffix else ""
         )
-
+        suffix=extracted.suffix
         subdomain = extracted.subdomain or ""
 
     # Długości
-    url_length = len(original_url)
-    domain_length = len(registered_domain)
+    url_length = len(url)
+    domain_length = len(domain)
+    subdomain_length = len(subdomain)
+    path_length = len(path)
     arguments_length = len(query)
+    suffix_length = len(suffix)
 
-    # Tokenizacja wyłącznie ścieżki.
-    # Usuwamy puste tokeny.
     url_tokens = [
         token
-        for token in TOKEN_SEPARATOR.split(original_url)
+        for token in TOKEN_SEPARATOR.split(url)
         if token
     ]
 
@@ -144,19 +143,21 @@ def extract_features(url):
 
     # Ekstrakcja cech
     features = {
-        # 1–3. Domeny
-        "domain": registered_domain,
+        "domain": domain,
         "tld": tld,
+        "suffix": suffix,
         "subdomain": subdomain,
-
-        # 4–6. Długości
         "url_length": url_length,
         "domain_length": domain_length,
+        "subdomain_length": subdomain_length,
+        "suffix_length": suffix_length,
         "host_length": host_length,
-
-        # 7–9. Stosunki długości
+        "path_length": path_length,
         "arguments_url_ratio": safe_ratio(
             arguments_length, url_length
+        ),
+        "path_url_ratio": safe_ratio(
+            path_length, url_length
         ),
         "arguments_domain_ratio": safe_ratio(
             arguments_length, domain_length
@@ -164,37 +165,32 @@ def extract_features(url):
         "arguments_hostname_ratio": safe_ratio(
             arguments_length, host_length
         ),
-
-        # 10–11. Tokeny ścieżki
+        "subdomain_domain_ratio": safe_ratio(
+            subdomain_length, domain_length
+        ),
+        "suffix_tld_ratio": safe_ratio(
+            suffix_length, len(tld)
+        ),
         "longest_url_token_length": longest_token_length,
         "average_url_token_length": average_token_length,
-
-        # 12–17. Liczba wybranych znaków w całym URL-u
-        "dot_count": original_url.count("."),
-        "hyphen_count": original_url.count("-"),
-        "underscore_count": original_url.count("_"),
-        "question_mark_count": original_url.count("?"),
-        "equal_sign_count": original_url.count("="),
-        "ampersand_count": original_url.count("&"),
-
-        # 18. Czy URL zaczyna się od HTTPS
+        "dot_count": url.count("."),
+        "hyphen_count": url.count("-"),
+        "underscore_count": url.count("_"),
+        "question_mark_count": url.count("?"),
+        "equal_sign_count": url.count("="),
+        "ampersand_count": url.count("&"),
         "has_https": int(
-            original_url.startswith("https://")
+            url.startswith("https://")
         ),
-
-        # 19. Entropia domeny
-        "domain_entropy": shannon_entropy(registered_domain),
-
-        # 20–21. Wszystkie symbole i cyfry w URL-u
+        "domain_entropy": shannon_entropy(domain),
+        "subdomain_entropy": shannon_entropy(subdomain),
         "symbol_count": sum(
-            not char.isalnum() for char in original_url
+            not char.isalnum() for char in url
         ),
         "digit_count": sum(
-            char.isdigit() for char in original_url
+            char.isdigit() for char in url
         ),
-        #22-23 dotyczy adresów IP
-        "is_ip": is_ip,
-        "ip_version": ip_version,
+        "is_ip": is_ip
     }
 
     return features
@@ -205,13 +201,6 @@ def extract_features(url):
 def main():
     # 1. Wczytanie danych
     df = pd.read_csv(INPUT_FILE, keep_default_na=False)
-
-    if URL_COLUMN not in df.columns:
-        raise KeyError(
-            f"Nie znaleziono kolumny '{URL_COLUMN}'. "
-            f"Dostępne kolumny: {list(df.columns)}"
-        )
-
     print(f"Wczytano {len(df)} rekordów.")
 
     # 2. Ekstrakcja
@@ -219,14 +208,14 @@ def main():
         df[URL_COLUMN].apply(extract_features).tolist(),
         index=df.index
     )
-
     # 3. Dodanie cech do oryginalnego DataFrame
     df = pd.concat([df, features_df], axis=1)
-
-    # 4. Zapis
+    # 4. Dodatkowe mapowanie etykiety na wartość liczbową
+    df['label'] = df['type'].map(label_mapping)
+    # 5. Zapis
     df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8")
 
-    # 5. Podsumowanie
+    # 6. Podsumowanie
     print(f"Wyekstraktowano {features_df.shape[1]} cech.")
     print(f"Zapisano dane do: {OUTPUT_FILE}")
     print("\nBrakujące wartości w nowych cechach:")
